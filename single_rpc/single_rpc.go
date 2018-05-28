@@ -1,4 +1,4 @@
-package rpc
+package single_rpc
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"github.com/anycable/anycable-go/node"
 	"github.com/apex/log"
 
-	grpcpool "github.com/anycable/anycable-go/pool"
 	pb "github.com/anycable/anycable-go/protos"
 	"google.golang.org/grpc"
 )
@@ -20,9 +19,6 @@ const (
 	retryInterval = 500
 	invokeTimeout = 3000
 
-	initialCapacity = 50
-	maxCapacity     = 50
-
 	metricsRPCCalls    = "rpc_call_total"
 	metricsRPCFailures = "rpc_error_total"
 )
@@ -30,7 +26,7 @@ const (
 // Controller implements node.Controller interface for gRPC
 type Controller struct {
 	host    string
-	pool    grpcpool.Pool
+	client  pb.RPCClient
 	metrics *metrics.Metrics
 	log     *log.Entry
 }
@@ -46,62 +42,26 @@ func NewController(config *config.Config, metrics *metrics.Metrics) *Controller 
 
 // Start initializes RPC connection pool
 func (c *Controller) Start() error {
-	host := c.host
-
-	factory := func() (*grpc.ClientConn, error) {
-		return grpc.Dial(host, grpc.WithInsecure())
-	}
-
-	pool, err := grpcpool.NewChannelPool(initialCapacity, maxCapacity, factory)
+	conn, err := grpc.Dial(c.host, grpc.WithInsecure())
 
 	if err == nil {
-		c.log.Infof("RPC pool initialized: %s", host)
+		c.log.Infof("RPC connection initialized: %s", c.host)
 	}
 
-	c.pool = pool
+	c.client = pb.NewRPCClient(conn)
+
 	return err
 }
 
 // Shutdown closes connections
 func (c *Controller) Shutdown() error {
-	if c.pool == nil {
-		return nil
-	}
-
-	c.pool.Close()
-
-	busy := c.pool.Busy()
-
-	if busy > 0 {
-		c.log.Infof("Waiting for active RPC calls to finish: %d", busy)
-	}
-
-	// Wait for active connections
-	_, err := retry(func() (interface{}, error) {
-		busy := c.pool.Busy()
-
-		if busy > 0 {
-			return false, fmt.Errorf("There are %d active RPC connections left", busy)
-		}
-
-		c.log.Info("All active RPC calls finished")
-		return true, nil
-	})
-
-	return err
+	// TODO: no-op?
+	return nil
 }
 
 // Authenticate performs Connect RPC call
 func (c *Controller) Authenticate(path string, headers *map[string]string) (string, []string, error) {
-	conn, err := c.getConn()
-
-	if err != nil {
-		return "", nil, err
-	}
-
-	defer conn.Close()
-
-	client := pb.NewRPCClient(conn.Conn)
+	client := c.client
 
 	op := func() (interface{}, error) {
 		return client.Connect(context.Background(), &pb.ConnectionRequest{Path: path, Headers: *headers})
@@ -135,15 +95,7 @@ func (c *Controller) Authenticate(path string, headers *map[string]string) (stri
 
 // Subscribe performs Command RPC call with "subscribe" command
 func (c *Controller) Subscribe(sid string, id string, channel string) (*node.CommandResult, error) {
-	conn, err := c.getConn()
-
-	if err != nil {
-		return nil, err
-	}
-
-	defer conn.Close()
-
-	client := pb.NewRPCClient(conn.Conn)
+	client := c.client
 
 	op := func() (interface{}, error) {
 		return client.Command(context.Background(), &pb.CommandMessage{Command: "subscribe", Identifier: channel, ConnectionIdentifiers: id})
@@ -156,15 +108,7 @@ func (c *Controller) Subscribe(sid string, id string, channel string) (*node.Com
 
 // Unsubscribe performs Command RPC call with "unsubscribe" command
 func (c *Controller) Unsubscribe(sid string, id string, channel string) (*node.CommandResult, error) {
-	conn, err := c.getConn()
-
-	if err != nil {
-		return nil, err
-	}
-
-	defer conn.Close()
-
-	client := pb.NewRPCClient(conn.Conn)
+	client := c.client
 
 	op := func() (interface{}, error) {
 		return client.Command(context.Background(), &pb.CommandMessage{Command: "unsubscribe", Identifier: channel, ConnectionIdentifiers: id})
@@ -177,15 +121,7 @@ func (c *Controller) Unsubscribe(sid string, id string, channel string) (*node.C
 
 // Perform performs Command RPC call with "perform" command
 func (c *Controller) Perform(sid string, id string, channel string, data string) (*node.CommandResult, error) {
-	conn, err := c.getConn()
-
-	if err != nil {
-		return nil, err
-	}
-
-	defer conn.Close()
-
-	client := pb.NewRPCClient(conn.Conn)
+	client := c.client
 
 	op := func() (interface{}, error) {
 		return client.Command(context.Background(), &pb.CommandMessage{Command: "message", Identifier: channel, ConnectionIdentifiers: id, Data: data})
@@ -198,15 +134,7 @@ func (c *Controller) Perform(sid string, id string, channel string, data string)
 
 // Disconnect performs disconnect RPC call
 func (c *Controller) Disconnect(sid string, id string, subscriptions []string, path string, headers *map[string]string) error {
-	conn, err := c.getConn()
-
-	if err != nil {
-		return err
-	}
-
-	defer conn.Close()
-
-	client := pb.NewRPCClient(conn.Conn)
+	client := c.client
 
 	op := func() (interface{}, error) {
 		return client.Disconnect(context.Background(), &pb.DisconnectRequest{Identifiers: id, Subscriptions: subscriptions, Path: path, Headers: *headers})
@@ -265,16 +193,6 @@ func (c *Controller) parseCommandResponse(response interface{}, err error) (*nod
 	c.metrics.Counter(metricsRPCFailures).Inc()
 
 	return nil, errors.New("Failed to deserialize command response")
-}
-
-func (c *Controller) getConn() (*grpcpool.Conn, error) {
-	conn, err := c.pool.Get()
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &conn, nil
 }
 
 func retry(callback func() (interface{}, error)) (res interface{}, err error) {
