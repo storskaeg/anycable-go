@@ -101,6 +101,8 @@ func main() {
 
 	runClients()
 
+	time.Sleep(5 * time.Second)
+
 	log.Infof("Running %d clients for %ds", num, runTime)
 
 	time.Sleep(time.Duration(runTime) * time.Second)
@@ -113,6 +115,10 @@ func main() {
 func runClients() {
 	for i := 0; i < num; i++ {
 		go runClient()
+
+		if i%10 == 0 {
+			time.Sleep(1 * time.Second)
+		}
 	}
 }
 
