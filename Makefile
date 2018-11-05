@@ -99,7 +99,7 @@ test-ci: prepare prepare-mruby test test-cable
 
 # Get dependencies and use gdm to checkout changesets
 prepare:
-	go get -u github.com/golang/dep/cmd/dep
+	test -f `which dep` || go get -u github.com/golang/dep/cmd/dep
 	dep ensure
 
 gen-ssl:
